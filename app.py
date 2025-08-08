@@ -1,80 +1,97 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import time
-import json
 
-st.set_page_config(page_title="GSC URL Inspection 批量检测", layout="wide")
-st.title("📊 GSC URL Inspection 批量检测工具（云端版）")
+# ------------------------- 你的 GSC 检测函数 -------------------------
+def inspect_url(sa_file, site_url, url):
+    """调用 Google Search Console API 检测 URL 状态"""
+    SCOPES = ['https://www.googleapis.com/auth/webmasters']
+    creds = service_account.Credentials.from_service_account_info(
+        sa_file, scopes=SCOPES)
+    service = build('searchconsole', 'v1', credentials=creds)
 
-uploaded_key = st.file_uploader("上传 Google Service Account JSON 密钥文件", type=["json"])
-uploaded_urls = st.file_uploader("上传 URL 列表 (.txt 或 .csv)", type=["txt", "csv"])
-site_url = st.text_input("输入 GSC 属性网址（必须与GSC里一致，如 https://www.soulinconn.com/）")
+    try:
+        request = {
+            'inspectionUrl': url,
+            'siteUrl': site_url
+        }
+        response = service.urlInspection().index().inspect(body=request).execute()
+        status = response['inspectionResult']['indexStatusResult']['coverageState']
+        return status
+    except Exception as e:
+        return f"Error: {e}"
 
-if uploaded_key and uploaded_urls and site_url:
-    if st.button("🚀 开始检测"):
-        # 读取密钥
-        try:
-            creds_dict = json.load(uploaded_key)
-        except:
-            st.error("❌ 无法解析 JSON 密钥")
-            st.stop()
+# ------------------------- Streamlit 应用 -------------------------
+st.set_page_config(page_title="GSC URL 批量检测工具（云端版）", layout="wide")
+st.title("🚀 GSC URL Inspection 批量检测工具 (支持断点续跑)")
 
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=["https://www.googleapis.com/auth/webmasters"]
-        )
-        service = build('searchconsole', 'v1', credentials=creds)
+# 存储运行结果在 session_state
+if "results" not in st.session_state:
+    st.session_state.results = []
 
-        # 读取 URL 列表
-        if uploaded_urls.name.endswith(".csv"):
-            df_urls = pd.read_csv(uploaded_urls, header=None)
-            urls_to_check = df_urls.iloc[:, 0].dropna().tolist()
+# 上传凭证
+uploaded_json = st.file_uploader("📂 上传 Google Service Account JSON 密钥文件", type=["json"])
+
+# 上传 URL 列表（CSV 或 TXT）
+uploaded_csv = st.file_uploader("📂 上传 URL 列表 或 上次的进度文件", type=["csv", "txt"])
+
+# 输入 GSC 属性
+site_url = st.text_input("🌐 GSC 属性网址（必须与 GSC 一致）", "https://www.example.com/")
+
+# 开始检测
+if st.button("🚀 开始检测"):
+    if uploaded_json and uploaded_csv and site_url:
+        sa_dict = pd.read_json(uploaded_json, typ='series').to_dict()
+
+        # 读取输入文件
+        df_input = pd.read_csv(uploaded_csv, header=None)
+        df_input.columns = ["url"] if df_input.shape[1] == 1 else df_input.columns
+
+        # 如果有 status 列，说明是上次进度，过滤已完成的
+        if "status" in df_input.columns:
+            done_count = df_input["status"].notna().sum()
+            st.info(f"检测到已有 {done_count} 条结果，将跳过这些 URL...")
+            urls_to_check = df_input[df_input["status"].isna()]["url"].tolist()
+            # 已完成的部分加载到 results
+            st.session_state.results = df_input[df_input["status"].notna()].to_dict("records")
         else:
-            urls_to_check = uploaded_urls.read().decode("utf-8").splitlines()
-            urls_to_check = [u.strip() for u in urls_to_check if u.strip()]
+            urls_to_check = df_input["url"].tolist()
 
-        st.write(f"共加载到 **{len(urls_to_check)}** 条URL，开始检测...")
-        results = []
+        total_urls = len(urls_to_check)
+        st.write(f"共需检测 {total_urls} 条 URL")
+
         progress_bar = st.progress(0)
+        status_text = st.empty()
 
-        for idx, u in enumerate(urls_to_check, start=1):
-            try:
-                request = {
-                    "inspectionUrl": u,
-                    "siteUrl": site_url
-                }
-                result = service.urlInspection().index().inspect(body=request).execute()
-                index_status = result['inspectionResult']['indexStatusResult']
-                coverage = index_status.get('coverageState', 'UNKNOWN')
-                verdict = index_status.get('verdict', 'UNKNOWN')
-                last_crawl = index_status.get('lastCrawlTime', 'N/A')
+        for idx, url in enumerate(urls_to_check):
+            status = inspect_url(sa_dict, site_url, url)
+            st.session_state.results.append({
+                "url": url,
+                "status": status
+            })
 
-                in_queue = "✅" if coverage.startswith("Discovered") else ""
-                results.append({
-                    "URL": u,
-                    "收录状态": coverage,
-                    "判断结果": verdict,
-                    "最后抓取时间": last_crawl,
-                    "是否排队中": in_queue
-                })
-            except Exception as e:
-                results.append({
-                    "URL": u,
-                    "收录状态": "ERROR",
-                    "判断结果": str(e),
-                    "最后抓取时间": "",
-                    "是否排队中": ""
-                })
+            progress_bar.progress((idx + 1) / total_urls)
+            status_text.text(f"{idx+1}/{total_urls} 已完成: {url} --> {status}")
 
-            progress_bar.progress(idx / len(urls_to_check))
-            time.sleep(0.1)
+            # 实时生成部分结果文件（包含已完成的部分）
+            temp_df = pd.DataFrame(st.session_state.results)
+            csv_data = temp_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇ 实时下载当前进度CSV（可用于断点续跑）",
+                data=csv_data,
+                file_name='gsc_results_partial.csv',
+                mime='text/csv'
+            )
 
-        df_results = pd.DataFrame(results)
-        st.success("✅ 检测完成")
-        st.dataframe(df_results)
-
-        csv = df_results.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 下载结果 CSV", data=csv, file_name="gsc_results.csv", mime="text/csv")
-else:
-    st.info("请上传密钥文件 + URL 列表，并输入站点URL")
+        st.success("✅ 检测完成！")
+        final_df = pd.DataFrame(st.session_state.results)
+        st.download_button(
+            label="⬇ 下载最终完整结果CSV",
+            data=final_df.to_csv(index=False).encode('utf-8'),
+            file_name=f'gsc_results_final_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+            mime='text/csv'
+        )
+    else:
+        st.error("请先上传 JSON 密钥 和 URL 列表，并输入 GSC 属性网址")
