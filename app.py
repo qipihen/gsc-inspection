@@ -71,7 +71,7 @@ def load_url_file(file):
 # 【3】Streamlit 应用主体
 # =====================================================
 st.set_page_config(page_title="GSC URL 批量检测工具", layout="wide")
-st.title("🚀 GSC URL Inspection 批量检测工具（云端全功能修正版）")
+st.title("🚀 GSC URL Inspection 批量检测工具（云端无冲突修正版）")
 
 if "results" not in st.session_state:
     st.session_state.results = []
@@ -83,10 +83,10 @@ uploaded_json = st.file_uploader("📂 上传 Google Service Account JSON 文件
 uploaded_file = st.file_uploader("📂 上传 URL 列表 / 上次进度文件（CSV/TXT/XLSX）", type=["csv", "txt", "xlsx"])
 
 # 输入 GSC 属性网址
-site_url = st.text_input("🌐 GSC 属性网址（与 Search Console 中一致）", "https://www.example.com/")
+site_url = st.text_input("🌐 GSC 属性网址（与 GSC 中完全一致）", "https://www.example.com/")
 
 # =====================================================
-# 【4】开始检测
+# 【4】开始检测按钮
 # =====================================================
 if st.button("🚀 开始检测"):
     if uploaded_json and uploaded_file and site_url:
@@ -118,12 +118,18 @@ if st.button("🚀 开始检测"):
             st.warning("没有需要检测的 URL，可能文件中全部已完成")
             st.stop()
 
-        # 进度条 + 状态文本
+        # 循环前先提供一个实时下载按钮（随时导出当前 results）
+        st.download_button(
+            label="⬇ 下载当前进度 CSV（可断点续跑）",
+            data=pd.DataFrame(st.session_state.results).to_csv(index=False).encode('utf-8'),
+            file_name="gsc_results_partial.csv",
+            mime="text/csv",
+            key="partial_before_loop"
+        )
+
+        # 进度条 + 状态显示
         progress_bar = st.progress(0)
         status_text = st.empty()
-
-        # ✅ 解决按钮冲突：循环外建立占位
-        download_placeholder = st.empty()
 
         # 循环检测
         for idx, url in enumerate(urls_to_check):
@@ -133,30 +139,19 @@ if st.button("🚀 开始检测"):
                 "status": status
             })
 
-            # 更新进度条与状态
             progress_bar.progress((idx + 1) / total_urls)
             status_text.text(f"{idx+1}/{total_urls} 已完成: {url} → {status}")
 
-            # 更新下载按钮（不会重复创建）
-            temp_df = pd.DataFrame(st.session_state.results)
-            csv_data = temp_df.to_csv(index=False).encode('utf-8')
-            download_placeholder.download_button(
-                label="⬇ 下载当前进度 CSV（可断点续跑）",
-                data=csv_data,
-                file_name="gsc_results_partial.csv",
-                mime="text/csv",
-                key="partial_download"
-            )
-
-        # 全部完成
+        # 检测完成后输出最终下载按钮
         st.success("✅ 检测完成！")
         final_df = pd.DataFrame(st.session_state.results)
         st.download_button(
             label="⬇ 下载最终完整结果 CSV",
             data=final_df.to_csv(index=False).encode('utf-8'),
             file_name=f'gsc_results_final_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
-            mime='text/csv'
+            mime='text/csv',
+            key="final_download"
         )
 
     else:
-        st.error("请上传 JSON 凭证文件、URL 文件，并输入 GSC 属性网址")
+        st.error("❌ 请上传 JSON 凭证文件、URL 文件，并输入 GSC 属性网址")
